@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { loginWithProvider, requestMagicLink } from "@/app/actions/auth";
 import { configuredAuthProviders } from "@/auth";
@@ -36,34 +37,49 @@ export default async function LoginPage({
   const errorMessage = error ? ERROR_MESSAGES[error] ?? "Sign-in failed. Please try again." : null;
 
   return (
-    <div className="mx-auto max-w-md space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold">Sign in to Invitz</h1>
-        <p className="mt-1 text-sm text-stone-600">
+    <div className="mx-auto max-w-md space-y-6 py-4">
+      <div className="space-y-1.5 text-center">
+        <span className="inv-kicker">Passwordless Authentication</span>
+        <h1 className="inv-heading text-3xl font-bold">Sign in to Invitz</h1>
+        <p className="inv-text-secondary text-sm">
           Use a single-use e-mail magic link or a verified social account.
         </p>
       </div>
 
       {verify === "1" && (
-        <div role="status" className="rounded-xl bg-emerald-50 p-4 text-sm text-emerald-900 ring-1 ring-emerald-200">
-          <p className="font-medium">Check your inbox</p>
-          <p className="mt-1">We sent a single-use sign-in link that expires in 10 minutes.</p>
+        <div
+          role="status"
+          className="inv-verdict-verified p-4 text-sm"
+          style={{ borderRadius: "var(--inv-radius-card)" }}
+        >
+          <p className="font-bold">✓ Check your inbox</p>
+          <p className="mt-1 opacity-90">
+            We sent a single-use sign-in link that expires in 10 minutes.
+          </p>
         </div>
       )}
 
       {errorMessage && (
-        <p role="alert" className="rounded-lg bg-rose-50 px-4 py-3 text-sm text-rose-700 ring-1 ring-rose-200">
+        <p
+          role="alert"
+          className="inv-verdict-rejected px-4 py-3 text-sm font-medium"
+          style={{ borderRadius: "var(--inv-radius-input)" }}
+        >
           {errorMessage}
         </p>
       )}
 
       {oauthList.length > 0 && (
-        <div className="space-y-2 rounded-2xl border border-stone-200 bg-white p-6 shadow-sm">
+        <div className="inv-card space-y-2.5 p-6">
+          <p className="inv-kicker">Verified OAuth Providers</p>
           {oauthList.map((p) => (
             <form key={p.id} action={loginWithProvider}>
               <input type="hidden" name="provider" value={p.id} />
               <input type="hidden" name="next" value={safeNext} />
-              <button className="w-full rounded-lg border border-stone-300 bg-white px-4 py-2.5 text-sm font-medium text-stone-900 hover:bg-stone-50">
+              <button
+                type="submit"
+                className="inv-btn-secondary w-full px-4 py-2.5 text-sm font-semibold"
+              >
                 {p.label}
               </button>
             </form>
@@ -71,10 +87,10 @@ export default async function LoginPage({
         </div>
       )}
 
-      <form action={requestMagicLink} className="space-y-4 rounded-2xl border border-stone-200 bg-white p-6 shadow-sm">
+      <form action={requestMagicLink} className="inv-card space-y-4 p-6 sm:p-7">
         <input type="hidden" name="next" value={safeNext} />
         <div>
-          <label htmlFor="email" className="mb-1 block text-sm font-medium">
+          <label htmlFor="email" className="mb-1.5 block text-sm font-semibold">
             E-mail magic link
           </label>
           <input
@@ -83,9 +99,9 @@ export default async function LoginPage({
             type="email"
             required
             placeholder="you@example.com"
-            className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-200"
+            className="inv-input w-full px-3.5 py-2.5 text-sm"
           />
-          <p className="mt-1 text-xs text-stone-500">
+          <p className="inv-text-muted mt-2 text-xs leading-relaxed">
             {providers.emailLive
               ? "We’ll e-mail a 10-minute single-use sign-in link."
               : providers.email
@@ -94,12 +110,21 @@ export default async function LoginPage({
           </p>
         </div>
         <button
+          type="submit"
           disabled={!providers.email}
-          className="w-full rounded-lg bg-violet-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
+          className="inv-btn-primary w-full px-4 py-2.5 text-sm disabled:cursor-not-allowed disabled:opacity-50"
         >
           Send magic link
         </button>
       </form>
+
+      <p className="inv-text-muted text-center text-xs">
+        Every shared invite is inspected by{" "}
+        <Link href="/guidelines" className="font-semibold underline hover:text-[var(--inv-ink)]">
+          Invitz Quality Control
+        </Link>{" "}
+        before anyone is notified.
+      </p>
     </div>
   );
 }
