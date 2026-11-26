@@ -1,10 +1,13 @@
 "use server";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { db } from "@/db";
-import { follows, notifications, users } from "@/db/schema";
+import { follows, notificationChannels, notifications, users } from "@/db/schema";
 import { requireUser } from "@/lib/auth";
+import { deliverNotificationNow } from "@/lib/notify/dispatch";
+import { publishBellUpdate } from "@/lib/notify/realtime";
+import { isUuid } from "@/lib/url";
 
 export async function toggleFollow(formData: FormData) {
   const me = await requireUser();
@@ -44,9 +47,75 @@ export async function toggleBell(formData: FormData) {
 
 export async function markAllRead() {
   const me = await requireUser();
+  const now = new Date();
   await db
     .update(notifications)
-    .set({ readAt: new Date() })
+    .set({ readAt: now })
     .where(and(eq(notifications.userId, me.id), eq(notifications.channel, "in_app")));
+  await publishBellUpdate({ userId: me.id, unreadCount: 0, kind: "read", at: now.toISOString() });
   revalidatePath("/", "layout");
+}
+
+export async function markOneRead(formData: FormData) {
+  const me = await requireUser();
+  const id = String(formData.get("notificationId") ?? "");
+  if (!isUuid(id)) return;
+  const now = new Date();
+  await db
+    .update(notifications)
+    .set({ readAt: now })
+    .where(and(eq(notifications.id, id), eq(notifications.userId, me.id), eq(notifications.channel, "in_app")));
+
+  const [{ unread }] = await db
+    .select({ unread: sql<number>`count(*)::int` })
+    .from(notifications)
+    .where(and(eq(notifications.userId, me.id), eq(notifications.channel, "in_app"), sql`${notifications.readAt} is null`));
+
+  await publishBellUpdate({ userId: me.id, notificationId: id, unreadCount: unread, kind: "read", at: now.toISOString() });
+  revalidatePath("/notifications");
+  revalidatePath("/", "layout");
+}
+
+export async function retryNotificationDelivery(formData: FormData) {
+  const me = await requireUser("/notifications");
+  const id = String(formData.get("notificationId") ?? "");
+  if (!isUuid(id)) return;
+
+  const [n] = await db
+    .select()
+    .from(notifications)
+    .where(and(eq(notifications.id, id), eq(notifications.userId, me.id), ne(notifications.channel, "in_app")))
+    .limit(1);
+  if (!n || !["failed", "dead_letter"].includes(n.status)) return;
+
+  // If the channel was paused by failures and user explicitly retries, give it a clean re-try attempt.
+  if (n.channelId) {
+    await db
+      .update(notificationChannels)
+      .set({ enabled: true, failureCount: 0, disabledReason: null })
+      .where(and(eq(notificationChannels.id, n.channelId), eq(notificationChannels.userId, me.id)));
+  }
+
+  await deliverNotificationNow(n.id, { allowRetryOfFailedOrDlq: true });
+  revalidatePath("/notifications");
+  revalidatePath("/settings");
+}
+
+export async function discardNotificationDelivery(formData: FormData) {
+  const me = await requireUser("/notifications");
+  const id = String(formData.get("notificationId") ?? "");
+  if (!isUuid(id)) return;
+
+  await db
+    .update(notifications)
+    .set({ status: "skipped", error: "Discarded from delivery queue by user.", nextRetryAt: null })
+    .where(
+      and(
+        eq(notifications.id, id),
+        eq(notifications.userId, me.id),
+        ne(notifications.channel, "in_app"),
+        inArray(notifications.status, ["failed", "dead_letter", "queued", "pending"]),
+      ),
+    );
+  revalidatePath("/notifications");
 }
