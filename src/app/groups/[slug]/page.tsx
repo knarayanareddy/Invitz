@@ -2,9 +2,9 @@ import { and, eq, sql } from "drizzle-orm";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { addMembers, joinGroup, leaveGroup, removeMember, toggleMute } from "@/app/actions/groups";
+import { Avatar, EmptyState, InviteCard } from "@/components/invite-card";
 import { db } from "@/db";
 import { groupMembers, groups, users } from "@/db/schema";
-import { EmptyState, InviteCard } from "@/components/invite-card";
 import { getCurrentUser } from "@/lib/auth";
 import { getFeed } from "@/lib/queries";
 
@@ -38,7 +38,12 @@ export default async function GroupPage({
     .where(eq(groupMembers.groupId, group.id));
 
   const members = await db
-    .select({ id: users.id, handle: users.handle, displayName: users.displayName, role: groupMembers.role })
+    .select({
+      id: users.id,
+      handle: users.handle,
+      displayName: users.displayName,
+      role: groupMembers.role,
+    })
     .from(groupMembers)
     .innerJoin(users, eq(users.id, groupMembers.userId))
     .where(eq(groupMembers.groupId, group.id))
@@ -48,84 +53,184 @@ export default async function GroupPage({
   const isOwner = group.ownerId === user?.id;
 
   return (
-    <div className="grid gap-8 lg:grid-cols-[1fr_280px]">
-      <div className="space-y-5">
-        {warn && <p className="rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-900 ring-1 ring-amber-200">{warn}</p>}
-        <header className="rounded-2xl border border-stone-200 bg-white p-6 shadow-sm">
-          <p className="text-xs uppercase tracking-wide text-stone-500">{group.type} group · {group.visibility}</p>
-          <h1 className="mt-1 text-2xl font-bold">{group.name}</h1>
-          <p className="mt-1 text-sm text-stone-600">{group.description}</p>
-          <div className="mt-4 flex flex-wrap gap-2">
-            {user && (
-              <Link href={`/share?group=${group.slug}`} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700">
-                Share to this group
-              </Link>
-            )}
-            {user && !meRow && group.visibility === "public" && (
-              <form action={joinGroup}>
-                <input type="hidden" name="groupId" value={group.id} />
-                <button className="rounded-lg border border-stone-300 px-4 py-2 text-sm font-medium hover:bg-stone-50">Join</button>
-              </form>
-            )}
-            {meRow && (
-              <form action={toggleMute}>
-                <input type="hidden" name="groupId" value={group.id} />
-                <input type="hidden" name="muted" value={String(meRow.muted)} />
-                <button className="rounded-lg border border-stone-300 px-4 py-2 text-sm hover:bg-stone-50">
-                  {meRow.muted ? "🔕 Muted: turn notifications on" : "🔔 Notifications on: mute"}
-                </button>
-              </form>
-            )}
-            {meRow && meRow.role !== "owner" && (
-              <form action={leaveGroup}>
-                <input type="hidden" name="groupId" value={group.id} />
-                <button className="rounded-lg px-4 py-2 text-sm text-rose-600 hover:bg-rose-50">Leave</button>
-              </form>
-            )}
-          </div>
-        </header>
-
-        {feed.length === 0 ? (
-          <EmptyState title="Nothing shared here yet" hint="Be the first to post an event to this group." />
-        ) : (
-          feed.map((i) => <InviteCard key={i.id} invite={i} />)
-        )}
+    <div className="space-y-6">
+      <div className="flex items-center justify-between gap-2">
+        <Link href="/groups" className="inv-btn-secondary px-3.5 py-1.5 text-xs">
+          ← All groups
+        </Link>
+        <span className="inv-kicker">
+          {group.type} community · {group.visibility}
+        </span>
       </div>
 
-      <aside className="space-y-4">
-        <section className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm">
-          <h2 className="text-sm font-semibold">{memberCount} members</h2>
-          <ul className="mt-3 max-h-80 space-y-2 overflow-auto text-sm">
-            {members.map((m) => (
-              <li key={m.id} className="flex items-center justify-between gap-2">
-                <Link href={`/people/${m.handle}`} className="truncate hover:underline">
-                  {m.displayName} <span className="text-stone-500">@{m.handle}</span>
-                </Link>
-                {isOwner && m.id !== user?.id ? (
-                  <form action={removeMember}>
-                    <input type="hidden" name="groupId" value={group.id} />
-                    <input type="hidden" name="userId" value={m.id} />
-                    <button className="text-xs text-rose-600 hover:underline">Remove</button>
-                  </form>
-                ) : m.role === "owner" ? (
-                  <span className="text-xs text-stone-500">owner</span>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-          {memberCount > members.length && (
-            <p className="mt-2 text-xs text-stone-500">Showing first {members.length} members.</p>
+      <div className="grid gap-8 lg:grid-cols-[1fr_300px]">
+        <div className="space-y-5">
+          {warn && (
+            <p
+              role="status"
+              className="inv-verdict-caution px-4 py-3 text-sm font-medium"
+              style={{ borderRadius: "var(--inv-radius-input)" }}
+            >
+              {warn}
+            </p>
           )}
-        </section>
-        {isOwner && (
-          <form action={addMembers} className="space-y-2 rounded-2xl border border-stone-200 bg-white p-4 shadow-sm">
-            <input type="hidden" name="groupId" value={group.id} />
-            <label className="text-sm font-semibold" htmlFor="handles">Add people</label>
-            <input id="handles" name="handles" placeholder="@ada, @maya" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-            <button className="w-full rounded-lg bg-stone-900 px-3 py-2 text-sm font-medium text-white">Add</button>
-          </form>
-        )}
-      </aside>
+
+          <header className="inv-card p-6 sm:p-7">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="inv-kicker">
+                    {group.type} group · {group.visibility}
+                  </span>
+                  {meRow && (
+                    <span className="inv-chip-accent px-2.5 py-0.5 text-[11px] font-semibold">
+                      Member
+                    </span>
+                  )}
+                </div>
+                <h1 className="inv-heading mt-1 text-3xl font-bold">#{group.name}</h1>
+                <p className="inv-text-secondary mt-1.5 text-sm leading-relaxed">
+                  {group.description}
+                </p>
+              </div>
+              <div className="inv-surface-subtle inv-mono shrink-0 px-3 py-1.5 text-xs font-semibold">
+                {memberCount} {memberCount === 1 ? "member" : "members"}
+              </div>
+            </div>
+
+            <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-[var(--inv-border)] pt-4">
+              {user && (
+                <Link
+                  href={`/share?group=${group.slug}`}
+                  className="inv-btn-primary px-4 py-2 text-xs sm:text-sm"
+                >
+                  + Share to this group
+                </Link>
+              )}
+              {user && !meRow && group.visibility === "public" && (
+                <form action={joinGroup}>
+                  <input type="hidden" name="groupId" value={group.id} />
+                  <button type="submit" className="inv-btn-secondary px-4 py-2 text-xs sm:text-sm">
+                    Join community
+                  </button>
+                </form>
+              )}
+              {meRow && (
+                <form action={toggleMute}>
+                  <input type="hidden" name="groupId" value={group.id} />
+                  <input type="hidden" name="muted" value={String(meRow.muted)} />
+                  <button type="submit" className="inv-btn-secondary px-4 py-2 text-xs sm:text-sm">
+                    {meRow.muted
+                      ? "🔕 Muted: turn notifications on"
+                      : "🔔 Notifications on: mute"}
+                  </button>
+                </form>
+              )}
+              {meRow && meRow.role !== "owner" && (
+                <form action={leaveGroup} className="ml-auto">
+                  <input type="hidden" name="groupId" value={group.id} />
+                  <button
+                    type="submit"
+                    className="inv-nav-link px-3 py-2 text-xs font-semibold text-[var(--inv-blocked-text)]"
+                  >
+                    Leave
+                  </button>
+                </form>
+              )}
+            </div>
+          </header>
+
+          {feed.length === 0 ? (
+            <EmptyState
+              title="Nothing shared here yet"
+              hint="Be the first to post a quality-checked event to this group."
+            >
+              {user && (
+                <Link
+                  href={`/share?group=${group.slug}`}
+                  className="inv-btn-primary px-4 py-2 text-sm"
+                >
+                  Share an event
+                </Link>
+              )}
+            </EmptyState>
+          ) : (
+            <div className="space-y-4">
+              {feed.map((i) => (
+                <InviteCard key={i.id} invite={i} />
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Members Sidebar */}
+        <aside className="space-y-4">
+          <section className="inv-card p-5">
+            <div className="flex items-center justify-between border-b border-[var(--inv-border)] pb-3">
+              <h2 className="inv-heading text-base font-bold">{memberCount} members</h2>
+              <span className="inv-kicker">Directory</span>
+            </div>
+            <ul className="mt-3 max-h-80 space-y-2.5 overflow-auto text-sm">
+              {members.map((m) => (
+                <li key={m.id} className="flex items-center justify-between gap-2">
+                  <Link
+                    href={`/people/${m.handle}`}
+                    className="flex min-w-0 items-center gap-2 hover:underline"
+                  >
+                    <Avatar name={m.displayName} size={26} />
+                    <span className="truncate font-medium">
+                      {m.displayName}{" "}
+                      <span className="inv-mono text-xs inv-text-muted">@{m.handle}</span>
+                    </span>
+                  </Link>
+                  {isOwner && m.id !== user?.id ? (
+                    <form action={removeMember}>
+                      <input type="hidden" name="groupId" value={group.id} />
+                      <input type="hidden" name="userId" value={m.id} />
+                      <button
+                        type="submit"
+                        className="text-xs font-medium text-[var(--inv-blocked-text)] hover:underline"
+                      >
+                        Remove
+                      </button>
+                    </form>
+                  ) : m.role === "owner" ? (
+                    <span className="inv-chip inv-mono px-2 py-0.5 text-[10px] uppercase">
+                      owner
+                    </span>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+            {memberCount > members.length && (
+              <p className="inv-text-muted mt-3 border-t border-[var(--inv-border)] pt-2 text-xs">
+                Showing first {members.length} members.
+              </p>
+            )}
+          </section>
+
+          {isOwner && (
+            <form action={addMembers} className="inv-card space-y-3 p-5">
+              <input type="hidden" name="groupId" value={group.id} />
+              <div>
+                <span className="inv-kicker">Invite by handle</span>
+                <label className="inv-heading block text-base font-bold" htmlFor="handles">
+                  Add people
+                </label>
+              </div>
+              <input
+                id="handles"
+                name="handles"
+                placeholder="@ada, @maya"
+                className="inv-input w-full px-3 py-2 text-sm"
+              />
+              <button type="submit" className="inv-btn-ink w-full px-3 py-2 text-sm">
+                Add to group
+              </button>
+            </form>
+          )}
+        </aside>
+      </div>
     </div>
   );
 }
