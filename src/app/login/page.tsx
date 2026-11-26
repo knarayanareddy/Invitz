@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { loginWithProvider, requestMagicLink } from "@/app/actions/auth";
+import { loginAsDemo, loginWithProvider, requestMagicLink } from "@/app/actions/auth";
 import { configuredAuthProviders } from "@/auth";
 import { getCurrentUser } from "@/lib/auth";
 import { ensureBootstrap } from "@/lib/bootstrap";
@@ -28,6 +28,7 @@ export default async function LoginPage({
   if (await getCurrentUser()) redirect(safeNext);
 
   const providers = configuredAuthProviders();
+  const demoEnabled = process.env.INVITZ_DEMO_SEED === "true";
   const oauthList = [
     providers.google && { id: "google", label: "Continue with Google" },
     providers.github && { id: "github", label: "Continue with GitHub" },
@@ -45,6 +46,38 @@ export default async function LoginPage({
           Use a single-use e-mail magic link or a verified social account.
         </p>
       </div>
+
+      {demoEnabled && (
+        <div className="inv-card space-y-3 border-[var(--inv-accent)] p-6">
+          <div>
+            <span className="inv-kicker">Preview Demo Access</span>
+            <h2 className="inv-heading text-lg font-bold">Try a seeded curator account</h2>
+            <p className="inv-text-secondary mt-1 text-xs">
+              Explore notification channels, quiet hours, digests, live inbox filters, and delivery logs right away.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {[
+              { handle: "ada", label: "Ada Okafor", role: "ML · @ada" },
+              { handle: "maya", label: "Maya Lindqvist", role: "Climate · @maya" },
+              { handle: "linus", label: "Linus Park", role: "VCs · @linus" },
+              { handle: "grace", label: "Grace Mwangi", role: "Data · @grace" },
+            ].map((d) => (
+              <form key={d.handle} action={loginAsDemo}>
+                <input type="hidden" name="handle" value={d.handle} />
+                <input type="hidden" name="next" value={safeNext === "/" ? "/settings" : safeNext} />
+                <button
+                  type="submit"
+                  className="inv-btn-secondary flex w-full flex-col items-start px-3.5 py-2.5 text-left"
+                >
+                  <span className="text-xs font-bold">{d.label}</span>
+                  <span className="inv-mono text-[11px] inv-text-muted">{d.role}</span>
+                </button>
+              </form>
+            ))}
+          </div>
+        </div>
+      )}
 
       {verify === "1" && (
         <div

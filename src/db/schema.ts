@@ -32,9 +32,10 @@ export type GroupType = "general" | "topic" | "custom";
 export type Visibility = "public" | "private";
 export type Verdict = "verified" | "caution" | "rejected";
 export type InviteStatus = "published" | "blocked" | "flagged";
-export type ChannelType = "discord" | "whatsapp" | "signal";
+export type ChannelType = "discord" | "whatsapp" | "signal" | "telegram" | "email";
 export type NotificationChannel = "in_app" | ChannelType;
-export type NotificationStatus = "pending" | "sent" | "dry_run" | "failed" | "skipped";
+export type NotificationStatus = "pending" | "queued" | "sent" | "dry_run" | "failed" | "skipped" | "dead_letter";
+export type DigestMode = "instant" | "hourly" | "daily" | "weekly";
 
 export const users = pgTable(
   "users",
@@ -279,22 +280,53 @@ export const notificationChannels = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     type: text("type").$type<ChannelType>().notNull(),
-    /** Discord webhook URL, or an E.164 phone number for WhatsApp / Signal. Encrypt at rest in production. */
+    /** AES-256-GCM encrypted destination (Discord webhook, E.164 phone, Telegram chat ID/handle, or email). */
     destination: text("destination").notNull(),
+    /** Deterministic HMAC-SHA256 hash of normalized (type, destination) for O(1) uniqueness & webhook lookup. */
+    destinationHash: text("destination_hash").notNull().default(""),
+    destinationKeyId: text("destination_key_id").notNull().default("v1"),
     verified: boolean("verified").notNull().default(false),
     /** True if the code was verified in dry-run/unconfigured mode; prevents unconsented live sends. */
     verifiedDryRun: boolean("verified_dry_run").notNull().default(false),
     enabled: boolean("enabled").notNull().default(true),
     /** If false (default) only "verified" invites are pushed to this channel. */
     includeUnverified: boolean("include_unverified").notNull().default(false),
+    digestMode: text("digest_mode").$type<DigestMode | null>(),
+    /** Encrypted dry-run preview code (only populated when live provider is unconfigured). */
     verifyCode: text("verify_code"),
+    /** HMAC-SHA256 hash of the 6-digit OTP code. */
+    verifyCodeHash: text("verify_code_hash"),
+    /** HMAC-SHA256 hash of the Telegram /start <token> deep-link token. */
+    verifyTokenHash: text("verify_token_hash"),
     verifyExpiresAt: ts("verify_expires_at"),
     verifyAttempts: integer("verify_attempts").notNull().default(0),
     verifyLockedUntil: ts("verify_locked_until"),
+    failureCount: integer("failure_count").notNull().default(0),
+    disabledReason: text("disabled_reason"),
+    optedInAt: ts("opted_in_at"),
+    optInSource: text("opt_in_source"),
+    optInConsentText: text("opt_in_consent_text"),
     createdAt: ts("created_at").notNull().defaultNow(),
   },
-  (t) => [uniqueIndex("channels_unique_dest").on(t.userId, t.type, t.destination)],
+  (t) => [
+    uniqueIndex("channels_unique_dest").on(t.userId, t.type, t.destinationHash),
+    index("channels_type_hash_idx").on(t.type, t.destinationHash),
+    index("channels_verify_token_hash_idx").on(t.verifyTokenHash),
+  ],
 );
+
+export const notificationPreferences = pgTable("notification_preferences", {
+  userId: uuid("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  timezone: text("timezone").notNull().default("UTC"),
+  quietStart: text("quiet_start"),
+  quietEnd: text("quiet_end"),
+  dailyCap: integer("daily_cap").notNull().default(5),
+  digestMode: text("digest_mode").$type<DigestMode>().notNull().default("instant"),
+  emailFallback: boolean("email_fallback").notNull().default(true),
+  updatedAt: ts("updated_at").notNull().defaultNow(),
+});
 
 export const notifications = pgTable(
   "notifications",
@@ -310,20 +342,50 @@ export const notifications = pgTable(
     channelId: uuid("channel_id").references(() => notificationChannels.id, { onDelete: "set null" }),
     reason: text("reason").notNull().default(""),
     status: text("status").$type<NotificationStatus>().notNull().default("pending"),
+    deliveryStatus: text("delivery_status"),
+    providerMessageId: text("provider_message_id"),
     attempts: integer("attempts").notNull().default(0),
+    lastHttpStatus: integer("last_http_status"),
     error: text("error"),
+    scheduledFor: ts("scheduled_for"),
+    nextRetryAt: ts("next_retry_at"),
+    deadLetteredAt: ts("dead_lettered_at"),
+    digestSentAt: ts("digest_sent_at"),
     readAt: ts("read_at"),
     sentAt: ts("sent_at"),
     createdAt: ts("created_at").notNull().defaultNow(),
   },
   (t) => [
     index("notifications_user_idx").on(t.userId, t.createdAt),
+    index("notifications_provider_msg_idx").on(t.providerMessageId),
+    index("notifications_status_sched_idx").on(t.status, t.scheduledFor),
     uniqueIndex("notifications_in_app_uniq")
       .on(t.inviteId, t.userId)
       .where(sql`channel = 'in_app'`),
     uniqueIndex("notifications_ext_uniq")
       .on(t.inviteId, t.userId, t.channelId)
       .where(sql`channel_id is not null`),
+    uniqueIndex("notifications_email_fallback_uniq")
+      .on(t.inviteId, t.userId)
+      .where(sql`channel = 'email' and channel_id is null`),
+  ],
+);
+
+export const discordGuildSubscriptions = pgTable(
+  "discord_guild_subscriptions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    guildId: text("guild_id").notNull(),
+    channelId: text("channel_id").notNull(),
+    groupId: uuid("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    installedByUserId: uuid("installed_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: ts("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("discord_guild_sub_uniq").on(t.channelId, t.groupId),
+    index("discord_guild_sub_group_idx").on(t.groupId),
   ],
 );
 

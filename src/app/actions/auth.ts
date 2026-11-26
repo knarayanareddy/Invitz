@@ -1,12 +1,13 @@
 "use server";
 
-import { eq } from "drizzle-orm";
-import { headers } from "next/headers";
+import { randomBytes } from "node:crypto";
+import { and, eq, ilike } from "drizzle-orm";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { AuthError } from "next-auth";
 import { signIn, signOut } from "@/auth";
 import { db } from "@/db";
-import { users } from "@/db/schema";
+import { sessions, users } from "@/db/schema";
 import { requireUser, revokeAllSessions } from "@/lib/auth";
 import { ensureBootstrap } from "@/lib/bootstrap";
 import { consumeAuthRateLimit } from "@/lib/rate-limit";
@@ -70,6 +71,46 @@ export async function loginWithProvider(formData: FormData) {
     }
     throw err;
   }
+}
+
+export async function loginAsDemo(formData: FormData) {
+  if (process.env.INVITZ_DEMO_SEED !== "true") {
+    redirect("/login?error=Configuration");
+  }
+  await ensureBootstrap();
+  const handle = String(formData.get("handle") ?? "ada").trim().toLowerCase();
+  const safeNext = sanitizeNextPath(String(formData.get("next") ?? "/settings"));
+
+  const [demoUser] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.handle, handle), ilike(users.email, "%@demo.invitz.app")))
+    .limit(1);
+
+  if (!demoUser) {
+    redirect("/login?error=AccessDenied");
+  }
+
+  const token = randomBytes(32).toString("hex");
+  const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  await db.insert(sessions).values({ sessionToken: token, userId: demoUser.id, expires });
+
+  const h = await headers();
+  const proto = h.get("x-forwarded-proto") ?? "";
+  const isHttps = proto.split(",")[0]?.trim() === "https" || process.env.COOKIE_SECURE === "true";
+  const isPreview = process.env.E2B_SANDBOX === "true";
+  const cookieName = isHttps ? "__Secure-authjs.session-token" : "authjs.session-token";
+
+  const jar = await cookies();
+  jar.set(cookieName, token, {
+    httpOnly: true,
+    sameSite: isPreview && isHttps ? "none" : "lax",
+    secure: isHttps,
+    path: "/",
+    expires,
+  });
+
+  redirect(safeNext);
 }
 
 export async function logout() {

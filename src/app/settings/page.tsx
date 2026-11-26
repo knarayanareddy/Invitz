@@ -2,19 +2,23 @@ import { eq } from "drizzle-orm";
 import Link from "next/link";
 import { deleteAccount, signOutEverywhere } from "@/app/actions/auth";
 import {
-  addChannel,
   removeChannel,
   resendCode,
   saveInterests,
+  saveNotificationPreferences,
   updateChannel,
   updateProfile,
   verifyChannel,
 } from "@/app/actions/settings";
+import { AddChannelForm } from "@/components/add-channel-form";
 import { Avatar } from "@/components/invite-card";
 import { db } from "@/db";
-import { notificationChannels, topics, userInterests } from "@/db/schema";
+import { notificationChannels, notificationPreferences, topics, userInterests } from "@/db/schema";
 import { listActiveSessions, requireUser } from "@/lib/auth";
+import { decryptSecret, maskDestination } from "@/lib/crypto";
 import { ADAPTERS, getAdapter } from "@/lib/notify/adapters";
+import { WHATSAPP_OPT_IN_CONSENT_TEXT } from "@/lib/notify/dispatch";
+import { COMMON_TIMEZONES } from "@/lib/notify/schedule";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +29,7 @@ export default async function SettingsPage({
 }) {
   const user = await requireUser("/settings");
   const { error, ok, welcome } = await searchParams;
-  const [allTopics, myInterests, channels, activeSessions] = await Promise.all([
+  const [allTopics, myInterests, channels, activeSessions, prefRows] = await Promise.all([
     db.select().from(topics).orderBy(topics.name),
     db
       .select({ topicId: userInterests.topicId })
@@ -36,9 +40,39 @@ export default async function SettingsPage({
       .from(notificationChannels)
       .where(eq(notificationChannels.userId, user.id)),
     listActiveSessions(user.id),
+    db
+      .select()
+      .from(notificationPreferences)
+      .where(eq(notificationPreferences.userId, user.id))
+      .limit(1),
   ]);
+
+  const prefs = prefRows[0] ?? {
+    userId: user.id,
+    timezone: "UTC",
+    quietStart: null,
+    quietEnd: null,
+    dailyCap: 5,
+    digestMode: "instant" as const,
+    emailFallback: true,
+    updatedAt: new Date(),
+  };
+
+  const timezoneChoices = COMMON_TIMEZONES.includes(prefs.timezone as (typeof COMMON_TIMEZONES)[number])
+    ? [...COMMON_TIMEZONES]
+    : [prefs.timezone, ...COMMON_TIMEZONES];
+
   const myTopicIds = new Set(myInterests.map((i) => i.topicId));
   const inputCls = "inv-input w-full px-3.5 py-2 text-sm";
+
+  const channelOptions = Object.values(ADAPTERS).map((a) => ({
+    type: a.type,
+    label: a.label,
+    placeholder: a.placeholder,
+    beta: a.beta,
+    consentRequired: a.consentRequired,
+    disabledReason: a.disabledReason?.() ?? null,
+  }));
 
   return (
     <div className="mx-auto max-w-2xl space-y-8">
@@ -214,15 +248,107 @@ export default async function SettingsPage({
         </form>
       </section>
 
-      {/* 3. Notification channels */}
+      {/* 3. Delivery preferences (quiet hours, timezone, daily cap, digests, email fallback) */}
+      <section className="inv-card p-6 sm:p-7">
+        <div className="border-b border-[var(--inv-border)] pb-3">
+          <span className="inv-kicker">Cadence &amp; Quiet Hours</span>
+          <h2 className="inv-heading text-xl font-bold">Delivery preferences</h2>
+          <p className="inv-text-secondary mt-1 text-sm">
+            Follow-bell alerts from curators stay instant; community invites follow your digest setting and pause during quiet hours.
+          </p>
+        </div>
+
+        <form action={saveNotificationPreferences} className="mt-5 space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-xs font-semibold inv-text-secondary" htmlFor="timezone">
+                Time zone
+              </label>
+              <select id="timezone" name="timezone" defaultValue={prefs.timezone} className={inputCls}>
+                {timezoneChoices.map((tz) => (
+                  <option key={tz} value={tz}>
+                    {tz}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold inv-text-secondary" htmlFor="digestMode">
+                Community digest cadence
+              </label>
+              <select id="digestMode" name="digestMode" defaultValue={prefs.digestMode} className={inputCls}>
+                <option value="instant">Instant (send immediately)</option>
+                <option value="hourly">Hourly digest</option>
+                <option value="daily">Daily digest (09:00 local)</option>
+                <option value="weekly">Weekly digest (Mon 09:00 local)</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div>
+              <label className="mb-1 block text-xs font-semibold inv-text-secondary" htmlFor="quietStart">
+                Quiet hours start
+              </label>
+              <input
+                id="quietStart"
+                name="quietStart"
+                type="time"
+                defaultValue={prefs.quietStart ?? ""}
+                className={`${inputCls} inv-mono`}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold inv-text-secondary" htmlFor="quietEnd">
+                Quiet hours end
+              </label>
+              <input
+                id="quietEnd"
+                name="quietEnd"
+                type="time"
+                defaultValue={prefs.quietEnd ?? ""}
+                className={`${inputCls} inv-mono`}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold inv-text-secondary" htmlFor="dailyCap">
+                Daily external cap <span className="font-normal inv-text-muted">(0 = ∞)</span>
+              </label>
+              <input
+                id="dailyCap"
+                name="dailyCap"
+                type="number"
+                min={0}
+                max={50}
+                defaultValue={prefs.dailyCap}
+                className={`${inputCls} inv-mono`}
+              />
+            </div>
+          </div>
+
+          <label className="inv-surface-subtle flex cursor-pointer items-center gap-2.5 p-3 text-sm inv-text-secondary">
+            <input type="checkbox" name="emailFallback" value="true" defaultChecked={prefs.emailFallback} />
+            <span>
+              Enable <strong>e-mail fallback</strong> when Discord, WhatsApp, Telegram, or Signal deliveries fail permanently or reach dead-letter.
+            </span>
+          </label>
+
+          <div className="flex justify-end pt-1">
+            <button type="submit" className="inv-btn-primary px-5 py-2 text-sm">
+              Save delivery preferences
+            </button>
+          </div>
+        </form>
+      </section>
+
+      {/* 4. Notification channels */}
       <section className="inv-card p-6 sm:p-7">
         <div className="border-b border-[var(--inv-border)] pb-3">
           <span className="inv-kicker">Multi-channel Dispatch</span>
           <h2 className="inv-heading text-xl font-bold">Where we notify you</h2>
           <p className="inv-text-secondary mt-1 text-sm">
-            Connect Discord, WhatsApp, or Signal to get instant pings. By default only{" "}
-            <strong>Verified</strong> invites are pushed; unverified (&ldquo;proceed with
-            caution&rdquo;) links stay in-app unless you opt in.
+            Connect Discord, Telegram, WhatsApp, Signal, or E-mail. Destinations are encrypted at rest, and only{" "}
+            <strong>Verified</strong> invites are pushed externally unless you opt in.
           </p>
         </div>
 
@@ -231,12 +357,21 @@ export default async function SettingsPage({
             {channels.map((c) => {
               const adapter = getAdapter(c.type);
               if (!adapter) return null;
+              let displayDest = "[encrypted]";
+              try {
+                displayDest = maskDestination(c.type, decryptSecret(c.destination));
+              } catch {
+                displayDest = "[encrypted]";
+              }
               return (
                 <li key={c.id} className="inv-surface-subtle p-4 text-sm">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="min-w-0">
                       <p className="flex flex-wrap items-center gap-2 font-bold">
                         <span>{adapter.label}</span>
+                        {adapter.beta && (
+                          <span className="inv-chip px-2 py-0.5 text-[11px] font-semibold uppercase">Beta</span>
+                        )}
                         {c.verified ? (
                           c.verifiedDryRun && adapter.configured() ? (
                             <span className="inv-verdict-caution px-2.5 py-0.5 text-xs font-semibold">
@@ -252,10 +387,18 @@ export default async function SettingsPage({
                             needs verification
                           </span>
                         )}
+                        {!c.enabled && (
+                          <span className="inv-verdict-rejected px-2.5 py-0.5 text-xs font-semibold">
+                            paused
+                          </span>
+                        )}
                       </p>
-                      <p className="inv-mono mt-0.5 truncate text-xs inv-text-muted">
-                        {c.type === "discord" ? `${c.destination.slice(0, 38)}…` : c.destination}
-                      </p>
+                      <p className="inv-mono mt-0.5 truncate text-xs inv-text-muted">{displayDest}</p>
+                      {c.disabledReason && (
+                        <p className="mt-1 text-xs font-medium text-[var(--inv-blocked-text)]">
+                          {c.disabledReason}
+                        </p>
+                      )}
                     </div>
                     <form action={removeChannel}>
                       <input type="hidden" name="channelId" value={c.id} />
@@ -294,13 +437,13 @@ export default async function SettingsPage({
                         <form action={resendCode}>
                           <input type="hidden" name="channelId" value={c.id} />
                           <button type="submit" className="text-xs font-semibold underline inv-text-secondary">
-                            Resend code
+                            {c.type === "telegram" ? "Regenerate link / code" : "Resend code"}
                           </button>
                         </form>
                       </div>
                     </div>
                   ) : (
-                    <div className="mt-3 flex flex-wrap gap-2 border-t border-[var(--inv-border)] pt-3">
+                    <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-[var(--inv-border)] pt-3">
                       <form action={updateChannel}>
                         <input type="hidden" name="channelId" value={c.id} />
                         <input type="hidden" name="field" value="enabled" />
@@ -319,6 +462,25 @@ export default async function SettingsPage({
                             : "Verified only · click to include unverified"}
                         </button>
                       </form>
+                      <form action={updateChannel} className="flex items-center gap-1.5">
+                        <input type="hidden" name="channelId" value={c.id} />
+                        <input type="hidden" name="field" value="digestMode" />
+                        <select
+                          name="value"
+                          aria-label={`Digest mode for ${adapter.label}`}
+                          defaultValue={c.digestMode ?? ""}
+                          className="inv-input px-2.5 py-1 text-xs"
+                        >
+                          <option value="">Default ({prefs.digestMode})</option>
+                          <option value="instant">Instant</option>
+                          <option value="hourly">Hourly</option>
+                          <option value="daily">Daily</option>
+                          <option value="weekly">Weekly</option>
+                        </select>
+                        <button type="submit" className="inv-btn-secondary px-2.5 py-1 text-xs">
+                          Set
+                        </button>
+                      </form>
                     </div>
                   )}
                 </li>
@@ -327,28 +489,14 @@ export default async function SettingsPage({
           </ul>
         )}
 
-        <form action={addChannel} className="mt-5 grid gap-2.5 sm:grid-cols-[150px_1fr_auto]">
-          <select name="type" aria-label="Channel type" className={inputCls}>
-            {Object.values(ADAPTERS).map((a) => (
-              <option key={a.type} value={a.type}>
-                {a.label}
-              </option>
-            ))}
-          </select>
-          <input
-            name="destination"
-            aria-label="Channel destination"
-            required
-            placeholder="Discord webhook URL or +14155550123"
-            className={inputCls}
-          />
-          <button type="submit" className="inv-btn-primary px-5 py-2 text-sm">
-            Add
-          </button>
-        </form>
+        <AddChannelForm
+          options={channelOptions}
+          consentText={WHATSAPP_OPT_IN_CONSENT_TEXT}
+          inputCls={inputCls}
+        />
       </section>
 
-      {/* 4. Sessions & account lifecycle */}
+      {/* 5. Sessions & account lifecycle */}
       <section className="inv-card p-6 sm:p-7">
         <div className="border-b border-[var(--inv-border)] pb-3">
           <span className="inv-kicker">Security &amp; Portability</span>

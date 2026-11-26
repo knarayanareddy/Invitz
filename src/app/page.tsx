@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
 import Link from "next/link";
+import { loginAsDemo } from "@/app/actions/auth";
 import { EmptyState, InviteCard } from "@/components/invite-card";
 import { db } from "@/db";
 import { groups } from "@/db/schema";
@@ -59,12 +60,19 @@ export default async function HomePage({
               </p>
 
               <div className="flex flex-wrap items-center gap-3 pt-2">
-                <Link
-                  href="/login"
-                  className="inv-btn-primary px-5 py-2.5 text-sm"
-                >
-                  Get started
-                </Link>
+                {process.env.INVITZ_DEMO_SEED === "true" ? (
+                  <form action={loginAsDemo}>
+                    <input type="hidden" name="handle" value="ada" />
+                    <input type="hidden" name="next" value="/settings" />
+                    <button type="submit" className="inv-btn-primary px-5 py-2.5 text-sm">
+                      Try live demo (@ada)
+                    </button>
+                  </form>
+                ) : (
+                  <Link href="/login" className="inv-btn-primary px-5 py-2.5 text-sm">
+                    Get started
+                  </Link>
+                )}
                 <Link
                   href="/guidelines"
                   className="inv-btn-secondary px-4 py-2.5 text-sm"
@@ -92,7 +100,7 @@ export default async function HomePage({
                   <div>
                     <p className="font-semibold">✓ Verified · 93% confidence</p>
                     <p className="mt-0.5 opacity-85">
-                      Real venue, date &amp; organiser confirmed. Pushed to Discord, WhatsApp &amp; Signal.
+                      Real venue, date &amp; organiser confirmed. Pushed via Discord, Telegram, WhatsApp, Signal &amp; E-mail with digests &amp; quiet hours.
                     </p>
                   </div>
                   <span className="inv-mono shrink-0 text-[10px] font-bold uppercase">

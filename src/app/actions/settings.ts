@@ -1,19 +1,33 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
 import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { db } from "@/db";
-import { groupMembers, groups, notificationChannels, topics, userInterests, users, type ChannelType } from "@/db/schema";
+import {
+  groupMembers,
+  groups,
+  notificationChannels,
+  notificationPreferences,
+  topics,
+  userInterests,
+  users,
+  type ChannelType,
+  type DigestMode,
+} from "@/db/schema";
 import { requireUser } from "@/lib/auth";
+import { encryptSecret, hashDestination, verifySecretConstantTime } from "@/lib/crypto";
 import { HANDLE_CHANGE_COOLDOWN_MS, validateHandle } from "@/lib/identity";
 import { getAdapter, normalizePhone } from "@/lib/notify/adapters";
-import { sendVerificationCode } from "@/lib/notify/dispatch";
+import { sendVerificationCode, WHATSAPP_OPT_IN_CONSENT_TEXT } from "@/lib/notify/dispatch";
+import { isValidTimeHHMM, isValidTimeZone } from "@/lib/notify/schedule";
 import { isUuid, sanitizeNextPath } from "@/lib/url";
 
 const MAX_VERIFY_ATTEMPTS = 5;
 const VERIFY_LOCK_MS = 15 * 60 * 1000;
 const RESEND_COOLDOWN_MS = 60 * 1000;
+const DIGEST_MODES = new Set<DigestMode>(["instant", "hourly", "daily", "weekly"]);
 
 const back = (msg?: string, key: "error" | "ok" = "error"): never =>
   redirect(`/settings${msg ? `?${key}=${encodeURIComponent(msg)}` : ""}`);
@@ -130,29 +144,141 @@ export async function saveInterests(formData: FormData) {
   back("Interests saved. You've been added to the matching communities.", "ok");
 }
 
+export async function saveNotificationPreferences(formData: FormData) {
+  const user = await requireUser("/settings");
+  const timezone = String(formData.get("timezone") ?? "UTC").trim() || "UTC";
+  if (!isValidTimeZone(timezone)) {
+    back("Please choose a valid IANA time zone.");
+  }
+
+  const quietStartRaw = String(formData.get("quietStart") ?? "").trim();
+  const quietEndRaw = String(formData.get("quietEnd") ?? "").trim();
+  if ((quietStartRaw && !quietEndRaw) || (!quietStartRaw && quietEndRaw)) {
+    back("Specify both quiet hours start and end times, or leave both empty.");
+  }
+  if (quietStartRaw && (!isValidTimeHHMM(quietStartRaw) || !isValidTimeHHMM(quietEndRaw))) {
+    back("Quiet hours must use 24-hour HH:MM format (e.g. 22:00 and 08:00).");
+  }
+
+  const rawCap = Number(formData.get("dailyCap") ?? 5);
+  if (!Number.isInteger(rawCap) || rawCap < 0 || rawCap > 50) {
+    back("Daily external cap must be between 0 (unlimited) and 50.");
+  }
+
+  const rawDigest = String(formData.get("digestMode") ?? "instant") as DigestMode;
+  const digestMode: DigestMode = DIGEST_MODES.has(rawDigest) ? rawDigest : "instant";
+  const emailFallback = formData.get("emailFallback") === "true" || formData.get("emailFallback") === "on";
+
+  await db
+    .insert(notificationPreferences)
+    .values({
+      userId: user.id,
+      timezone,
+      quietStart: quietStartRaw || null,
+      quietEnd: quietEndRaw || null,
+      dailyCap: rawCap,
+      digestMode,
+      emailFallback,
+      updatedAt: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: notificationPreferences.userId,
+      set: {
+        timezone,
+        quietStart: quietStartRaw || null,
+        quietEnd: quietEndRaw || null,
+        dailyCap: rawCap,
+        digestMode,
+        emailFallback,
+        updatedAt: new Date(),
+      },
+    });
+
+  revalidatePath("/settings");
+  back("Delivery preferences saved.", "ok");
+}
+
 export async function addChannel(formData: FormData) {
   const user = await requireUser("/settings");
-  const type = String(formData.get("type") ?? "");
+  const type = String(formData.get("type") ?? "") as ChannelType;
   const adapter = getAdapter(type);
   if (!adapter) back("Unknown channel.");
+
+  const disabledReason = adapter!.disabledReason?.();
+  if (disabledReason) back(disabledReason);
+
   const rawDest = String(formData.get("destination") ?? "").trim();
-  const destination = type === "discord" ? rawDest : normalizePhone(rawDest);
+  let destination = rawDest;
+  if (type === "whatsapp" || type === "signal") {
+    destination = normalizePhone(rawDest);
+  } else if (type === "email") {
+    destination = rawDest.toLowerCase();
+  } else if (type === "telegram" && (!rawDest || rawDest.toLowerCase() === "connect")) {
+    destination = `pending:${randomUUID()}`;
+  }
+
   const problem = adapter!.validate(destination);
   if (problem) back(problem);
 
+  if (type === "whatsapp") {
+    const consented = formData.get("whatsappConsent") === "true" || formData.get("whatsappConsent") === "on";
+    if (!consented) {
+      back("Please confirm WhatsApp opt-in consent before adding a WhatsApp number.");
+    }
+  }
+
+  const rawDigest = String(formData.get("digestMode") ?? "").trim() as DigestMode;
+  const digestMode = DIGEST_MODES.has(rawDigest) ? rawDigest : null;
+
+  const { ciphertext, keyId } = encryptSecret(destination);
+  const destinationHash = hashDestination(type, destination);
+
   const [channel] = await db
     .insert(notificationChannels)
-    .values({ userId: user.id, type: type as ChannelType, destination })
+    .values({
+      userId: user.id,
+      type,
+      destination: ciphertext,
+      destinationHash,
+      destinationKeyId: keyId,
+      digestMode,
+      ...(type === "whatsapp"
+        ? {
+            optedInAt: new Date(),
+            optInSource: "settings_otp",
+            optInConsentText: WHATSAPP_OPT_IN_CONSENT_TEXT,
+          }
+        : {}),
+    })
     .onConflictDoNothing()
     .returning();
+
   if (!channel) back("That destination is already connected.");
-  const result = await sendVerificationCode(channel.id);
+
+  const result = (await sendVerificationCode(channel.id)) as {
+    ok: boolean;
+    dryRun?: boolean;
+    dryRunCode?: string;
+    error?: string;
+    telegramStartUrl?: string;
+    telegramStartCommand?: string;
+  };
   revalidatePath("/settings");
-  if (!result.ok) back(`Channel added, but sending the code failed (${result.error}). Use "Resend code".`);
+  if (!result.ok) back(`Channel added, but sending verification failed (${result.error}). Use "Resend code".`);
+
+  if (result.telegramStartCommand) {
+    const hint = result.telegramStartUrl
+      ? `Open ${result.telegramStartUrl} and press Start (or send "${result.telegramStartCommand}" to the bot).`
+      : result.dryRun && result.dryRunCode
+        ? `Telegram channel added in dry-run mode (test code: ${result.dryRunCode}, or bot command "${result.telegramStartCommand}").`
+        : `Send "${result.telegramStartCommand}" to your Invitz Telegram bot to finish connecting.`;
+    back(hint, "ok");
+  }
+
   back(
     result.dryRun
-      ? "Channel added (dry-run mode: see the test code below)."
-      : "Channel added. Check your messages for the code.",
+      ? `Channel added in dry-run mode${result.dryRunCode ? ` (test code: ${result.dryRunCode})` : ""}.`
+      : "Channel added. Check your messages for the 6-digit verification code.",
     "ok",
   );
 }
@@ -173,9 +299,29 @@ export async function resendCode(formData: FormData) {
       back("Please wait a minute before requesting another code.");
     }
   }
-  const result = await sendVerificationCode(id);
+  const result = (await sendVerificationCode(id)) as {
+    ok: boolean;
+    dryRun?: boolean;
+    dryRunCode?: string;
+    error?: string;
+    telegramStartUrl?: string;
+    telegramStartCommand?: string;
+  };
   revalidatePath("/settings");
-  back(result.ok ? "A new code was sent." : `Could not send the code (${result.error}).`, result.ok ? "ok" : "error");
+  if (result.telegramStartCommand) {
+    const hint = result.telegramStartUrl
+      ? `Open ${result.telegramStartUrl} or send "${result.telegramStartCommand}" to the bot.`
+      : `Send "${result.telegramStartCommand}" to the Invitz Telegram bot.`;
+    back(hint, "ok");
+  }
+  back(
+    result.ok
+      ? result.dryRun && result.dryRunCode
+        ? `A new dry-run test code was generated: ${result.dryRunCode}`
+        : "A new code was sent."
+      : `Could not send the code (${result.error}).`,
+    result.ok ? "ok" : "error",
+  );
 }
 
 export async function verifyChannel(formData: FormData) {
@@ -192,10 +338,16 @@ export async function verifyChannel(formData: FormData) {
   if (ch.verifyLockedUntil && ch.verifyLockedUntil > new Date()) {
     back("Too many incorrect attempts. Try again in 15 minutes.");
   }
-  if (!ch.verifyCode || !ch.verifyExpiresAt || ch.verifyExpiresAt < new Date()) {
+  const hasCode = Boolean(ch.verifyCodeHash || ch.verifyCode);
+  if (!hasCode || !ch.verifyExpiresAt || ch.verifyExpiresAt < new Date()) {
     back("That code expired. Request a new one.");
   }
-  if (ch.verifyCode !== code) {
+
+  const valid = ch.verifyCodeHash
+    ? verifySecretConstantTime(code, ch.verifyCodeHash)
+    : ch.verifyCode === code;
+
+  if (!valid) {
     const nextAttempts = ch.verifyAttempts + 1;
     const locked = nextAttempts >= MAX_VERIFY_ATTEMPTS;
     await db
@@ -203,7 +355,7 @@ export async function verifyChannel(formData: FormData) {
       .set({
         verifyAttempts: nextAttempts,
         verifyLockedUntil: locked ? new Date(Date.now() + VERIFY_LOCK_MS) : null,
-        ...(locked ? { verifyCode: null, verifyExpiresAt: null } : {}),
+        ...(locked ? { verifyCode: null, verifyCodeHash: null, verifyTokenHash: null, verifyExpiresAt: null } : {}),
       })
       .where(eq(notificationChannels.id, id));
     back(locked ? "Too many incorrect attempts. Request a new code in 15 minutes." : "Incorrect code.");
@@ -217,9 +369,13 @@ export async function verifyChannel(formData: FormData) {
       verified: true,
       verifiedDryRun: isDryRun,
       verifyCode: null,
+      verifyCodeHash: null,
+      verifyTokenHash: null,
       verifyExpiresAt: null,
       verifyAttempts: 0,
       verifyLockedUntil: null,
+      failureCount: 0,
+      disabledReason: null,
     })
     .where(eq(notificationChannels.id, id));
   revalidatePath("/settings");
@@ -235,12 +391,29 @@ export async function updateChannel(formData: FormData) {
   const user = await requireUser("/settings");
   const id = String(formData.get("channelId") ?? "");
   if (!isUuid(id)) return;
-  const field = String(formData.get("field"));
+  const field = String(formData.get("field") ?? "");
+
+  if (field === "digestMode") {
+    const raw = String(formData.get("value") ?? "").trim() as DigestMode;
+    const nextDigest = DIGEST_MODES.has(raw) ? raw : null;
+    await db
+      .update(notificationChannels)
+      .set({ digestMode: nextDigest })
+      .where(and(eq(notificationChannels.id, id), eq(notificationChannels.userId, user.id), eq(notificationChannels.verified, true)));
+    revalidatePath("/settings");
+    return;
+  }
+
   const value = formData.get("value") === "true";
   if (field !== "enabled" && field !== "includeUnverified") return;
+
   await db
     .update(notificationChannels)
-    .set(field === "enabled" ? { enabled: value } : { includeUnverified: value })
+    .set(
+      field === "enabled"
+        ? { enabled: value, ...(value ? { failureCount: 0, disabledReason: null } : {}) }
+        : { includeUnverified: value },
+    )
     .where(and(eq(notificationChannels.id, id), eq(notificationChannels.userId, user.id), eq(notificationChannels.verified, true)));
   revalidatePath("/settings");
 }
